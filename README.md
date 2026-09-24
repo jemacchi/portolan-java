@@ -198,4 +198,10 @@ The long-term objective is simple:
 
 > A Java developer should be able to support Portolan by adding a normal Java dependency.
 
+## Local documentation
+
+- [Scope](docs/scope.md) defines what belongs in the Java core.
+- [Examples](docs/examples.md) shows basic API usage.
+- [Development](docs/development.md) lists Maven and Make targets.
+
 ---
