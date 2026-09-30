@@ -38,7 +38,12 @@ final class JsonSupport {
       if ("http".equals(href.getScheme()) || "https".equals(href.getScheme())) {
         HttpRequest request =
             HttpRequest.newBuilder(href).header("User-Agent", "portolan-java").GET().build();
-        String body = HTTP.send(request, HttpResponse.BodyHandlers.ofString()).body();
+        HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() / 100 != 2) {
+          throw new IllegalArgumentException(
+              "Cannot read JSON from " + href + ": HTTP " + response.statusCode());
+        }
+        String body = response.body();
         node = MAPPER.readTree(body);
       } else if ("file".equals(href.getScheme())) {
         node = MAPPER.readTree(Path.of(href).toFile());

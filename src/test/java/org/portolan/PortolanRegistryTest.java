@@ -7,6 +7,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -106,6 +109,77 @@ class PortolanRegistryTest {
             null);
 
     assertTrue(entries.isEmpty());
+  }
+
+  @Test
+  void usesDefaultRegistryUrlAndAppliesCatalogIdAndZeroLimitFilters() {
+    AtomicReference<String> requestedUrl = new AtomicReference<>();
+    String registry =
+        """
+        {
+          "links": [
+            {
+              "rel": "child",
+              "href": "https://example.test/a/catalog.json",
+              "portolan_registry:id": "catalog-a",
+              "portolan_registry:status": "valid"
+            }
+          ]
+        }
+        """;
+
+    List<RegistryCatalogEntry> excluded =
+        PortolanRegistry.loadRegistryEntries(
+            null,
+            url -> {
+              requestedUrl.set(url);
+              return JsonSupport.readObject(registry);
+            },
+            Set.of("another-catalog"),
+            false,
+            null);
+    List<RegistryCatalogEntry> limited =
+        PortolanRegistry.loadRegistryEntries(
+            "memory:registry", url -> JsonSupport.readObject(registry), null, false, 0);
+    List<RegistryCatalogEntry> belowLimit =
+        PortolanRegistry.loadRegistryEntries(
+            "memory:registry", url -> JsonSupport.readObject(registry), null, false, 2);
+
+    assertEquals(PortolanRegistry.DEFAULT_REGISTRY_URL, requestedUrl.get());
+    assertTrue(excluded.isEmpty());
+    assertTrue(limited.isEmpty());
+    assertEquals(1, belowLimit.size());
+  }
+
+  @Test
+  void usesDefaultFileFetcherAndRejectsNonArrayRegistryLinks() throws Exception {
+    Path validRegistry = tempDir.resolve("registry.json");
+    Files.writeString(
+        validRegistry,
+        """
+        {
+          "links": [{
+            "rel": "child",
+            "href": "https://example.test/a/catalog.json",
+            "portolan_registry:id": "catalog-a",
+            "portolan_registry:status": "valid"
+          }]
+        }
+        """);
+    Path invalidRegistry = tempDir.resolve("invalid-registry.json");
+    Files.writeString(invalidRegistry, "{\"links\":{}}");
+
+    assertEquals(
+        List.of("catalog-a"),
+        PortolanRegistry.loadRegistryEntries(
+                validRegistry.toUri().toString(), null, null, false, null)
+            .stream()
+            .map(RegistryCatalogEntry::id)
+            .toList());
+    assertTrue(
+        PortolanRegistry.loadRegistryEntries(
+                invalidRegistry.toUri().toString(), null, null, false, null)
+            .isEmpty());
   }
 
   @Test
@@ -273,5 +347,107 @@ class PortolanRegistryTest {
 
     String collection = Files.readString(catalogRoot.resolve("roads/collection.json"));
     assertTrue(collection.contains("\"assets\" : [ ]"));
+  }
+
+  @Test
+  void downloadsWithDefaultFileFetcherAndFallsBackToCatalogId() throws Exception {
+    Path source = tempDir.resolve("source/catalog.json");
+    Files.createDirectories(source.getParent());
+    Files.writeString(source, "{\"type\":\"Catalog\",\"id\":\"demo\"}");
+
+    Path catalogRoot =
+        PortolanRegistry.downloadRegistryCatalog(
+            source.toUri().toString(), tempDir.resolve("downloads"), null);
+    Path fallbackRoot =
+        PortolanRegistry.downloadRegistryCatalog(
+            "https://example.test/catalog.json",
+            tempDir.resolve("fallback"),
+            url -> JsonSupport.readObject("{\"type\":\"Catalog\",\"id\":\" \"}"));
+
+    assertTrue(Files.exists(catalogRoot.resolve("catalog.json")));
+    assertEquals(tempDir.resolve("fallback/catalog"), fallbackRoot);
+    assertTrue(Files.exists(fallbackRoot.resolve("catalog.json")));
+  }
+
+  @Test
+  void downloadsEachDocumentOnceWhenCatalogLinksFormACycle() throws Exception {
+    AtomicInteger fetchCount = new AtomicInteger();
+    Map<String, String> responses =
+        Map.of(
+            "https://example.test/demo/catalog.json",
+            """
+            {
+              "type": "Catalog",
+              "id": "demo",
+              "links": [{"rel": "child", "href": "./nested/catalog.json"}]
+            }
+            """,
+            "https://example.test/demo/nested/catalog.json",
+            """
+            {
+              "type": "Catalog",
+              "id": "nested",
+              "links": [{"rel": "child", "href": "../catalog.json"}]
+            }
+            """);
+
+    Path catalogRoot =
+        PortolanRegistry.downloadRegistryCatalog(
+            "https://example.test/demo/catalog.json",
+            tempDir,
+            url -> {
+              fetchCount.incrementAndGet();
+              return JsonSupport.readObject(responses.get(url));
+            });
+
+    assertTrue(Files.exists(catalogRoot.resolve("catalog.json")));
+    assertTrue(Files.exists(catalogRoot.resolve("nested/catalog.json")));
+    assertEquals(2, fetchCount.get());
+  }
+
+  @Test
+  void handlesRelativeRootUrisAndChildrenOnAnotherOrigin() throws Exception {
+    Map<String, String> responses =
+        Map.of(
+            "root/catalog.json",
+            """
+            {
+              "type": "Catalog",
+              "links": [
+                {"rel": "item", "href": "./ignored.json"},
+                {"rel": "child", "href": "https://example.test/collection.json"}
+              ]
+            }
+            """,
+            "https://example.test/collection.json",
+            "{\"type\":\"Collection\",\"id\":\"remote\"}");
+
+    Path root =
+        PortolanRegistry.downloadRegistryCatalog(
+            "root/catalog.json",
+            tempDir,
+            url -> JsonSupport.readObject(responses.get(url)));
+    Path parentlessRoot =
+        PortolanRegistry.downloadRegistryCatalog(
+            "catalog.json",
+            tempDir.resolve("parentless"),
+            url -> JsonSupport.readObject("{\"type\":\"Catalog\"}"));
+
+    assertEquals(tempDir.resolve("root"), root);
+    assertTrue(Files.exists(root.resolve("catalog.json")));
+    assertTrue(Files.exists(root.resolve("collection.json")));
+    assertEquals(tempDir.resolve("parentless/catalog"), parentlessRoot);
+    assertTrue(Files.exists(parentlessRoot.resolve("catalog.json")));
+  }
+
+  @Test
+  void preservesCatalogsWhoseLinksHaveTheWrongShape() throws Exception {
+    Path root =
+        PortolanRegistry.downloadRegistryCatalog(
+            "https://example.test/demo/catalog.json",
+            tempDir,
+            url -> JsonSupport.readObject("{\"type\":\"Catalog\",\"id\":\"demo\",\"links\":{}}"));
+
+    assertTrue(Files.exists(root.resolve("catalog.json")));
   }
 }

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -27,6 +28,9 @@ public final class PortolanRegistry {
       Set<String> catalogIds,
       boolean includeStale,
       Integer limit) {
+    if (limit != null && limit <= 0) {
+      return List.of();
+    }
     JsonFetcher fetch = fetcher != null ? fetcher : url -> JsonSupport.readObject(URI.create(url));
     ObjectNode registry = fetch.fetch(registryUrl != null ? registryUrl : DEFAULT_REGISTRY_URL);
     List<RegistryCatalogEntry> entries = new ArrayList<>();
@@ -66,12 +70,24 @@ public final class PortolanRegistry {
       catalogId = fallbackCatalogId(catalogUrl);
     }
     Path catalogRoot = outputDir.resolve(catalogId);
-    writeCatalogTree(URI.create(catalogUrl), catalog, URI.create(catalogUrl), catalogRoot, fetch);
+    writeCatalogTree(
+        URI.create(catalogUrl),
+        catalog,
+        URI.create(catalogUrl),
+        catalogRoot,
+        fetch,
+        new HashSet<>());
     return catalogRoot;
   }
 
   private static void writeCatalogTree(
-      URI documentUri, ObjectNode document, URI rootUri, Path outputRoot, JsonFetcher fetch) {
+      URI documentUri,
+      ObjectNode document,
+      URI rootUri,
+      Path outputRoot,
+      JsonFetcher fetch,
+      Set<URI> visited) {
+    visited.add(documentUri.normalize());
     Path relativePath = relativeDocumentPath(rootUri, documentUri);
     Path target = outputRoot.resolve(relativePath);
     ObjectNode toWrite = document;
@@ -93,10 +109,13 @@ public final class PortolanRegistry {
         continue;
       }
       URI childUri = documentUri.resolve(href);
+      if (visited.contains(childUri.normalize())) {
+        continue;
+      }
       ObjectNode child = fetch.fetch(childUri.toString());
       String type = JsonSupport.text(child, "type");
       if ("Catalog".equals(type) || "Collection".equals(type)) {
-        writeCatalogTree(childUri, child, rootUri, outputRoot, fetch);
+        writeCatalogTree(childUri, child, rootUri, outputRoot, fetch, visited);
       }
     }
   }
