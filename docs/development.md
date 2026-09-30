@@ -18,8 +18,8 @@ make test
 make coverage
 ```
 
-`make coverage` runs `mvn verify`, which writes the JaCoCo report and enforces
-the configured coverage floor.
+`make coverage` runs `mvn verify`. JaCoCo writes the HTML report to
+`target/site/jacoco/index.html` and enforces 100% line and branch coverage.
 
 ## Build and install
 

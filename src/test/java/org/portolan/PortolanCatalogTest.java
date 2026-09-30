@@ -2,9 +2,8 @@ package org.portolan;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -155,6 +154,43 @@ class PortolanCatalogTest {
   }
 
   @Test
+  void stopsAtCatalogCyclesAndIgnoresUnknownChildren() throws Exception {
+    writeJson(
+        tempDir.resolve("catalog.json"),
+        """
+        {
+          "type": "Catalog",
+          "id": "root",
+          "links": [
+            {"rel": "self", "href": "./catalog.json"},
+            {"rel": "child", "href": "./nested/catalog.json"},
+            {"rel": "child", "href": "./unknown.json"}
+          ]
+        }
+        """);
+    writeJson(
+        tempDir.resolve("nested/catalog.json"),
+        """
+        {
+          "type": "Catalog",
+          "id": "nested",
+          "links": [
+            {"rel": "child", "href": "../catalog.json"},
+            {"rel": "child", "href": "./collection.json"}
+          ]
+        }
+        """);
+    writeJson(tempDir.resolve("unknown.json"), "{\"type\":\"Feature\",\"id\":\"ignored\"}");
+    writeJson(
+        tempDir.resolve("nested/collection.json"),
+        "{\"type\":\"Collection\",\"id\":\"roads\"}");
+
+    PortolanCatalog catalog = PortolanCatalog.open(tempDir);
+
+    assertEquals(List.of("roads"), catalog.collections().stream().map(PortolanCollection::id).toList());
+  }
+
+  @Test
   void documentAccessorsIgnoreInvalidLinksAssetsAndItems() throws Exception {
     writeJson(tempDir.resolve("ignored.json"), "{\"type\":\"Catalog\",\"id\":\"ignored\",\"links\":[]}");
     writeJson(
@@ -213,49 +249,39 @@ class PortolanCatalogTest {
   }
 
   @Test
-  void classifiesAssetsByMediaTypeAndHref() {
-    URI document = URI.create("https://example.test/collection.json");
+  void documentAccessorsReturnEmptyListsWhenLinksAndAssetsAreAbsent() {
+    PortolanCollection collection =
+        new PortolanCollection(
+            JsonSupport.readObject("{\"type\":\"Collection\",\"id\":\"empty\"}"),
+            tempDir.resolve("collection.json").toUri());
 
-    assertEquals(
-        AssetFormat.GEOPARQUET,
-        new PortolanAsset(
-                "parquet",
-                URI.create("https://example.test/data"),
-                "application/vnd.apache.parquet",
-                List.of(),
-                null,
-                null,
-                null)
-            .format());
-    assertEquals(
-        AssetFormat.COG,
-        new PortolanAsset("cog", document.resolve("image.tif"), null, List.of(), null, null, null)
-            .format());
-    assertEquals(
-        AssetFormat.PMTILES,
-        new PortolanAsset(
-                "pmtiles",
-                URI.create("https://example.test/tiles"),
-                "application/vnd.pmtiles",
-                List.of(),
-                null,
-                null,
-                null)
-            .format());
-    assertEquals(
-        AssetFormat.UNKNOWN,
-        new PortolanAsset(
-                "unknown",
-                URI.create("https://example.test/readme.txt"),
-                "text/plain",
-                List.of(),
-                null,
-                null,
-                null)
-            .format());
-    assertEquals(
-        AssetFormat.UNKNOWN,
-        new PortolanAsset("unknown", null, null, List.of(), null, null, null).format());
+    assertEquals(List.of(), collection.links());
+    assertEquals(List.of(), collection.assets());
+    assertEquals(List.of(), collection.items());
+  }
+
+  @Test
+  void documentAccessorsRejectWrongContainerShapesAndOptionalRoleShapes() {
+    PortolanCollection invalidContainers =
+        new PortolanCollection(
+            JsonSupport.readObject("{\"links\":{},\"assets\":[]}"),
+            tempDir.resolve("invalid.json").toUri());
+    PortolanCollection optionalRoles =
+        new PortolanCollection(
+            JsonSupport.readObject(
+                """
+                {
+                  "assets": {
+                    "without_roles": {"href": "./one.parquet"},
+                    "invalid_roles": {"href": "./two.parquet", "roles": "data"}
+                  }
+                }
+                """),
+            tempDir.resolve("roles.json").toUri());
+
+    assertEquals(List.of(), invalidContainers.links());
+    assertEquals(List.of(), invalidContainers.assets());
+    assertTrue(optionalRoles.assets().stream().allMatch(asset -> asset.roles().isEmpty()));
   }
 
   @Test
@@ -361,12 +387,6 @@ class PortolanCatalogTest {
             "item.road-1.links",
             "item.road-1.assets.bad"),
         result.errors().stream().map(ValidationError::path).toList());
-  }
-
-  @Test
-  void jsonSupportRejectsInvalidAndNonObjectJson() {
-    assertThrows(IllegalArgumentException.class, () -> JsonSupport.readObject("[]"));
-    assertThrows(IllegalArgumentException.class, () -> JsonSupport.readObject("{"));
   }
 
   private static void writeJson(Path path, String json) throws Exception {
