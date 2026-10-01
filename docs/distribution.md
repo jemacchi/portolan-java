@@ -29,8 +29,9 @@ before you create another release.
 
 ## Use GitHub Packages
 
-Set the repository variable `PUBLISH_GITHUB_PACKAGES` to `true`. A version tag
-then publishes `org.portolan:portolan-java` with the release version.
+Each version tag publishes `org.portolan:portolan-java` with the release
+version. Set the repository variable `PUBLISH_GITHUB_PACKAGES` to `false` only
+when a release must skip the package repository.
 
 GitHub Packages requires a personal access token with `read:packages`, even for
 a public package. Put the token in `~/.m2/settings.xml`:

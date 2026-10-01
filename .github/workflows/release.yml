@@ -53,7 +53,7 @@ jobs:
             > target/SHA256SUMS
 
       - name: Publish to GitHub Packages
-        if: vars.PUBLISH_GITHUB_PACKAGES == 'true'
+        if: vars.PUBLISH_GITHUB_PACKAGES != 'false'
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ github.token }}
