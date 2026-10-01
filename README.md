@@ -203,5 +203,6 @@ The long-term objective is simple:
 - [Scope](docs/scope.md) defines what belongs in the Java core.
 - [Examples](docs/examples.md) shows basic API usage.
 - [Development](docs/development.md) lists Maven and Make targets.
+- [Distribution](docs/distribution.md) explains releases and Maven repositories.
 
 ---
