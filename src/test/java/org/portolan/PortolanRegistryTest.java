@@ -1,6 +1,7 @@
 package org.portolan;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -109,6 +110,28 @@ class PortolanRegistryTest {
             null);
 
     assertTrue(entries.isEmpty());
+  }
+
+  @Test
+  void resolvesRelativeRegistryCatalogUrls() {
+    List<RegistryCatalogEntry> entries =
+        PortolanRegistry.loadRegistryEntries(
+            "https://registry.test/exports/catalogs.json",
+            url ->
+                JsonSupport.readObject(
+                    """
+                    {"links":[{
+                      "rel":"child",
+                      "href":"../demo/catalog.json",
+                      "portolan_registry:id":"demo",
+                      "portolan_registry:status":"valid"
+                    }]}
+                    """),
+            null,
+            false,
+            null);
+
+    assertEquals("https://registry.test/demo/catalog.json", entries.get(0).url());
   }
 
   @Test
@@ -406,7 +429,7 @@ class PortolanRegistryTest {
   }
 
   @Test
-  void handlesRelativeRootUrisAndChildrenOnAnotherOrigin() throws Exception {
+  void rejectsChildrenOnAnotherOriginAndHandlesParentlessUris() throws Exception {
     Map<String, String> responses =
         Map.of(
             "root/catalog.json",
@@ -422,22 +445,183 @@ class PortolanRegistryTest {
             "https://example.test/collection.json",
             "{\"type\":\"Collection\",\"id\":\"remote\"}");
 
-    Path root =
-        PortolanRegistry.downloadRegistryCatalog(
-            "root/catalog.json",
-            tempDir,
-            url -> JsonSupport.readObject(responses.get(url)));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            PortolanRegistry.downloadRegistryCatalog(
+                "root/catalog.json",
+                tempDir,
+                url -> JsonSupport.readObject(responses.get(url))));
     Path parentlessRoot =
         PortolanRegistry.downloadRegistryCatalog(
             "catalog.json",
             tempDir.resolve("parentless"),
             url -> JsonSupport.readObject("{\"type\":\"Catalog\"}"));
 
-    assertEquals(tempDir.resolve("root"), root);
-    assertTrue(Files.exists(root.resolve("catalog.json")));
-    assertTrue(Files.exists(root.resolve("collection.json")));
     assertEquals(tempDir.resolve("parentless/catalog"), parentlessRoot);
     assertTrue(Files.exists(parentlessRoot.resolve("catalog.json")));
+  }
+
+  @Test
+  void rejectsUnsafeChildPathsBeforeFetchingThem() {
+    AtomicInteger fetchCount = new AtomicInteger();
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            PortolanRegistry.downloadRegistryCatalog(
+                "https://example.test/demo/catalog.json",
+                tempDir,
+                url -> {
+                  fetchCount.incrementAndGet();
+                  return JsonSupport.readObject(
+                      """
+                      {"type":"Catalog","id":"demo","links":[
+                        {"rel":"child","href":"../../outside.json"}
+                      ]}
+                      """);
+                }));
+
+    assertEquals(1, fetchCount.get());
+  }
+
+  @Test
+  void rejectsCatalogRootSymlinks() throws Exception {
+    Path outside = Files.createDirectory(tempDir.resolve("outside"));
+    Files.createSymbolicLink(tempDir.resolve("demo"), outside);
+
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                PortolanRegistry.downloadRegistryCatalog(
+                    "https://example.test/demo/catalog.json",
+                    tempDir,
+                    url -> JsonSupport.readObject("{\"type\":\"Catalog\",\"id\":\"demo\"}")));
+
+    assertTrue(error.getMessage().contains("must not be a symlink"));
+    try (var files = Files.list(outside)) {
+      assertTrue(files.findAny().isEmpty());
+    }
+  }
+
+  @Test
+  void rejectsRegistryIdMismatch() {
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                PortolanRegistry.downloadRegistryCatalog(
+                    "https://example.test/demo/catalog.json",
+                    tempDir,
+                    "selected",
+                    url -> JsonSupport.readObject("{\"type\":\"Catalog\",\"id\":\"other\"}")));
+
+    assertTrue(error.getMessage().contains("does not match registry id"));
+  }
+
+  @Test
+  void rejectsUnsafeCatalogIds() {
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                PortolanRegistry.downloadRegistryCatalog(
+                    "https://example.test/demo/catalog.json",
+                    tempDir,
+                    url -> JsonSupport.readObject("{\"type\":\"Catalog\",\"id\":\"../other\"}")));
+
+    assertTrue(error.getMessage().contains("safe directory name"));
+  }
+
+  @Test
+  void rejectsConcurrentDownloadsForTheSameCatalog() throws Exception {
+    Files.createFile(tempDir.resolve(".demo.lock"));
+
+    IllegalStateException error =
+        assertThrows(
+            IllegalStateException.class,
+            () ->
+                PortolanRegistry.downloadRegistryCatalog(
+                    "https://example.test/demo/catalog.json",
+                    tempDir,
+                    url -> JsonSupport.readObject("{\"type\":\"Catalog\",\"id\":\"demo\"}")));
+
+    assertTrue(error.getMessage().contains("already in progress"));
+  }
+
+  @Test
+  void replacesACompletePreviousSnapshot() throws Exception {
+    Path root = Files.createDirectory(tempDir.resolve("demo"));
+    Files.writeString(root.resolve("stale.json"), "stale");
+
+    Path downloaded =
+        PortolanRegistry.downloadRegistryCatalog(
+            "https://example.test/demo/catalog.json",
+            tempDir,
+            url -> JsonSupport.readObject("{\"type\":\"Catalog\",\"id\":\"demo\"}"));
+
+    assertTrue(Files.exists(downloaded.resolve("catalog.json")));
+    assertTrue(Files.notExists(downloaded.resolve("stale.json")));
+  }
+
+  @Test
+  void preservesPreviousSnapshotWhenChildFetchFails() throws Exception {
+    Path root = Files.createDirectory(tempDir.resolve("demo"));
+    Path previous = root.resolve("catalog.json");
+    Files.writeString(previous, "previous");
+
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            PortolanRegistry.downloadRegistryCatalog(
+                "https://example.test/demo/catalog.json",
+                tempDir,
+                url -> {
+                  if (url.endsWith("catalog.json")) {
+                    return JsonSupport.readObject(
+                        """
+                        {"type":"Catalog","id":"demo","links":[
+                          {"rel":"child","href":"./missing.json"}
+                        ]}
+                        """);
+                  }
+                  throw new IllegalStateException("unavailable");
+                }));
+
+    assertEquals("previous", Files.readString(previous));
+    try (var files = Files.list(tempDir)) {
+      assertTrue(files.noneMatch(path -> path.getFileName().toString().startsWith(".demo.staging-")));
+    }
+  }
+
+  @Test
+  void rejectsDocumentsThatMapToTheSamePath() {
+    AtomicInteger fetchCount = new AtomicInteger();
+
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                PortolanRegistry.downloadRegistryCatalog(
+                    "https://example.test/demo/catalog.json",
+                    tempDir,
+                    url -> {
+                      fetchCount.incrementAndGet();
+                      if (url.endsWith("catalog.json")) {
+                        return JsonSupport.readObject(
+                            """
+                            {"type":"Catalog","id":"demo","links":[
+                              {"rel":"child","href":"./collection.json?v=1"},
+                              {"rel":"child","href":"./collection.json?v=2"}
+                            ]}
+                            """);
+                      }
+                      return JsonSupport.readObject("{\"type\":\"Collection\",\"id\":\"roads\"}");
+                    }));
+
+    assertTrue(error.getMessage().contains("same local path"));
+    assertEquals(2, fetchCount.get());
   }
 
   @Test
