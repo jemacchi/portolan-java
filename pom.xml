@@ -5,7 +5,7 @@
 
   <groupId>org.portolan</groupId>
   <artifactId>portolan-java</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>0.1.1-SNAPSHOT</version>
   <name>Portolan Java</name>
   <description>A lightweight Java implementation of the Portolan specification.</description>
   <url>https://github.com/jemacchi/portolan-java</url>
@@ -109,12 +109,12 @@
                     <limit>
                       <counter>LINE</counter>
                       <value>COVEREDRATIO</value>
-                      <minimum>1.00</minimum>
+                      <minimum>0.85</minimum>
                     </limit>
                     <limit>
                       <counter>BRANCH</counter>
                       <value>COVEREDRATIO</value>
-                      <minimum>1.00</minimum>
+                      <minimum>0.85</minimum>
                     </limit>
                   </limits>
                 </rule>

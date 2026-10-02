@@ -2,11 +2,19 @@ package org.portolan;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
 import java.net.URI;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Registry utilities for Portolan catalog exports. */
@@ -32,7 +40,8 @@ public final class PortolanRegistry {
       return List.of();
     }
     JsonFetcher fetch = fetcher != null ? fetcher : url -> JsonSupport.readObject(URI.create(url));
-    ObjectNode registry = fetch.fetch(registryUrl != null ? registryUrl : DEFAULT_REGISTRY_URL);
+    String effectiveRegistryUrl = registryUrl != null ? registryUrl : DEFAULT_REGISTRY_URL;
+    ObjectNode registry = fetch.fetch(effectiveRegistryUrl);
     List<RegistryCatalogEntry> entries = new ArrayList<>();
     JsonNode links = registry.get("links");
     if (links == null || !links.isArray()) {
@@ -54,7 +63,10 @@ public final class PortolanRegistry {
       if (catalogIds != null && !catalogIds.contains(registryId)) {
         continue;
       }
-      entries.add(new RegistryCatalogEntry(registryId, href, JsonSupport.text(link, "title"), status));
+      String resolvedHref = URI.create(effectiveRegistryUrl).resolve(href).toString();
+      entries.add(
+          new RegistryCatalogEntry(
+              registryId, resolvedHref, JsonSupport.text(link, "title"), status));
       if (limit != null && entries.size() >= limit) {
         break;
       }
@@ -63,20 +75,59 @@ public final class PortolanRegistry {
   }
 
   public static Path downloadRegistryCatalog(String catalogUrl, Path outputDir, JsonFetcher fetcher) {
+    return downloadRegistryCatalog(catalogUrl, outputDir, null, fetcher);
+  }
+
+  public static Path downloadRegistryCatalog(
+      String catalogUrl, Path outputDir, String expectedCatalogId, JsonFetcher fetcher) {
     JsonFetcher fetch = fetcher != null ? fetcher : url -> JsonSupport.readObject(URI.create(url));
     ObjectNode catalog = fetch.fetch(catalogUrl);
     String catalogId = JsonSupport.text(catalog, "id");
     if (catalogId == null || catalogId.isBlank()) {
       catalogId = fallbackCatalogId(catalogUrl);
     }
+    validateCatalogId(catalogId);
+    if (expectedCatalogId != null) {
+      validateCatalogId(expectedCatalogId);
+      if (!catalogId.equals(expectedCatalogId)) {
+        throw new IllegalArgumentException(
+            "Catalog id '"
+                + catalogId
+                + "' does not match registry id '"
+                + expectedCatalogId
+                + "'");
+      }
+    }
     Path catalogRoot = outputDir.resolve(catalogId);
-    writeCatalogTree(
-        URI.create(catalogUrl),
-        catalog,
-        URI.create(catalogUrl),
-        catalogRoot,
-        fetch,
-        new HashSet<>());
+    Path lock = null;
+    Path stagingRoot = null;
+    try {
+      Files.createDirectories(outputDir);
+      lock = acquireCatalogLock(outputDir, catalogId);
+      validateCatalogRoot(outputDir, catalogRoot);
+      stagingRoot = Files.createTempDirectory(outputDir.toRealPath(), "." + catalogId + ".staging-");
+      writeCatalogTree(
+          URI.create(catalogUrl),
+          catalog,
+          URI.create(catalogUrl),
+          stagingRoot,
+          fetch,
+          new HashSet<>(),
+          new HashMap<>());
+      publishSnapshot(stagingRoot, catalogRoot, outputDir);
+      stagingRoot = null;
+    } catch (IOException e) {
+      throw new IllegalArgumentException("Cannot publish catalog snapshot " + catalogId, e);
+    } finally {
+      deleteTree(stagingRoot);
+      if (lock != null) {
+        try {
+          Files.deleteIfExists(lock);
+        } catch (IOException ignored) {
+          // The completed operation is more important than a stale advisory lock.
+        }
+      }
+    }
     return catalogRoot;
   }
 
@@ -86,10 +137,16 @@ public final class PortolanRegistry {
       URI rootUri,
       Path outputRoot,
       JsonFetcher fetch,
-      Set<URI> visited) {
+      Set<URI> visited,
+      Map<Path, URI> targets) {
     visited.add(documentUri.normalize());
     Path relativePath = relativeDocumentPath(rootUri, documentUri);
-    Path target = outputRoot.resolve(relativePath);
+    Path target = targetDocumentPath(outputRoot, relativePath, documentUri);
+    URI owner = targets.putIfAbsent(target, documentUri);
+    if (owner != null && !owner.equals(documentUri)) {
+      throw new IllegalArgumentException(
+          "Registry documents map to the same local path: " + owner + ", " + documentUri);
+    }
     ObjectNode toWrite = document;
     if ("Collection".equals(JsonSupport.text(document, "type"))) {
       toWrite = withAbsoluteAssetHrefs(documentUri, document);
@@ -112,10 +169,17 @@ public final class PortolanRegistry {
       if (visited.contains(childUri.normalize())) {
         continue;
       }
+      Path childTarget =
+          targetDocumentPath(outputRoot, relativeDocumentPath(rootUri, childUri), childUri);
+      URI childOwner = targets.get(childTarget);
+      if (childOwner != null && !childOwner.equals(childUri)) {
+        throw new IllegalArgumentException(
+            "Registry documents map to the same local path: " + childOwner + ", " + childUri);
+      }
       ObjectNode child = fetch.fetch(childUri.toString());
       String type = JsonSupport.text(child, "type");
       if ("Catalog".equals(type) || "Collection".equals(type)) {
-        writeCatalogTree(childUri, child, rootUri, outputRoot, fetch, visited);
+        writeCatalogTree(childUri, child, rootUri, outputRoot, fetch, visited, targets);
       }
     }
   }
@@ -143,15 +207,117 @@ public final class PortolanRegistry {
   }
 
   private static Path relativeDocumentPath(URI rootUri, URI documentUri) {
+    if (!sameOrigin(rootUri, documentUri)) {
+      throw new IllegalArgumentException("Child document has a different origin: " + documentUri);
+    }
     Path rootParent = Path.of(rootUri.getPath()).getParent();
     Path documentPath = Path.of(documentUri.getPath());
     if (rootParent == null) {
       return Path.of(documentPath.getFileName().toString());
     }
+    Path relative = rootParent.relativize(documentPath);
+    if (relative.startsWith("..")) {
+      throw new IllegalArgumentException("Child document is outside catalog root: " + documentUri);
+    }
+    return relative;
+  }
+
+  private static boolean sameOrigin(URI first, URI second) {
+    return normalized(first.getScheme()).equals(normalized(second.getScheme()))
+        && normalized(first.getAuthority()).equals(normalized(second.getAuthority()));
+  }
+
+  private static String normalized(String value) {
+    return value == null ? "" : value.toLowerCase(java.util.Locale.ROOT);
+  }
+
+  private static Path targetDocumentPath(Path outputRoot, Path relativePath, URI documentUri) {
+    Path resolvedRoot = outputRoot.toAbsolutePath().normalize();
+    Path target = outputRoot.resolve(relativePath).toAbsolutePath().normalize();
+    if (!target.startsWith(resolvedRoot)) {
+      throw new IllegalArgumentException("Child document escapes catalog root: " + documentUri);
+    }
+    return target;
+  }
+
+  private static void validateCatalogId(String catalogId) {
+    Path id = Path.of(catalogId);
+    if (catalogId.isBlank()
+        || ".".equals(catalogId)
+        || "..".equals(catalogId)
+        || catalogId.contains("\\")
+        || id.getNameCount() != 1
+        || !id.getFileName().toString().equals(catalogId)) {
+      throw new IllegalArgumentException("Catalog id must be a safe directory name: " + catalogId);
+    }
+  }
+
+  private static Path acquireCatalogLock(Path outputDir, String catalogId) throws IOException {
+    Path lock = outputDir.toRealPath().resolve("." + catalogId + ".lock");
     try {
-      return rootParent.relativize(documentPath);
-    } catch (IllegalArgumentException e) {
-      return Path.of(documentPath.getFileName().toString());
+      return Files.createFile(lock);
+    } catch (FileAlreadyExistsException e) {
+      throw new IllegalStateException("Catalog download is already in progress: " + catalogId, e);
+    }
+  }
+
+  private static void validateCatalogRoot(Path outputDir, Path catalogRoot) throws IOException {
+    if (Files.isSymbolicLink(catalogRoot)) {
+      throw new IllegalArgumentException("Catalog directory must not be a symlink: " + catalogRoot);
+    }
+    Path resolvedOutput = outputDir.toRealPath();
+    Path resolvedCatalog = catalogRoot.toAbsolutePath().normalize();
+    if (!resolvedCatalog.startsWith(resolvedOutput)) {
+      throw new IllegalArgumentException("Catalog directory escapes output directory: " + catalogRoot);
+    }
+  }
+
+  private static void publishSnapshot(Path stagingRoot, Path catalogRoot, Path outputDir)
+      throws IOException {
+    validateCatalogRoot(outputDir, catalogRoot);
+    Path backup =
+        Files.createTempDirectory(
+            outputDir.toRealPath(), "." + catalogRoot.getFileName() + ".backup-");
+    Files.delete(backup);
+    boolean hadPrevious = Files.exists(catalogRoot, LinkOption.NOFOLLOW_LINKS);
+    if (hadPrevious) {
+      move(catalogRoot, backup);
+    }
+    try {
+      move(stagingRoot, catalogRoot);
+    } catch (IOException e) {
+      if (hadPrevious) {
+        move(backup, catalogRoot);
+      }
+      throw e;
+    }
+    deleteTree(backup);
+  }
+
+  private static void move(Path source, Path target) throws IOException {
+    try {
+      Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+    } catch (AtomicMoveNotSupportedException e) {
+      Files.move(source, target);
+    }
+  }
+
+  private static void deleteTree(Path root) {
+    if (root == null || Files.notExists(root, LinkOption.NOFOLLOW_LINKS)) {
+      return;
+    }
+    try (var paths = Files.walk(root)) {
+      paths.sorted(java.util.Comparator.reverseOrder()).forEach(PortolanRegistry::deleteQuietly);
+    } catch (IOException ignored) {
+      // Best-effort cleanup must not replace the original download failure.
+    }
+  }
+
+  private static void deleteQuietly(Path path) {
+    try {
+      Files.deleteIfExists(path);
+    } catch (IOException ignored) {
+      // Best-effort cleanup must not replace the original download failure.
     }
   }
 

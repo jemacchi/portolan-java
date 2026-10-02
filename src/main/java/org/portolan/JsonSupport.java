@@ -16,7 +16,8 @@ final class JsonSupport {
   static final ObjectMapper MAPPER =
       new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
 
-  private static final HttpClient HTTP = HttpClient.newHttpClient();
+  private static final HttpClient HTTP =
+      HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
 
   private JsonSupport() {}
 
