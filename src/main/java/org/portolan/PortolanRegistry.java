@@ -139,49 +139,58 @@ public final class PortolanRegistry {
       JsonFetcher fetch,
       Set<URI> visited,
       Map<Path, URI> targets) {
-    visited.add(documentUri.normalize());
+    URI normalizedDocumentUri = documentUri.normalize();
+    visited.add(normalizedDocumentUri);
     Path relativePath = relativeDocumentPath(rootUri, documentUri);
     Path target = targetDocumentPath(outputRoot, relativePath, documentUri);
-    URI owner = targets.putIfAbsent(target, documentUri);
-    if (owner != null && !owner.equals(documentUri)) {
+    URI owner = targets.putIfAbsent(target, normalizedDocumentUri);
+    if (owner != null && !owner.equals(normalizedDocumentUri)) {
       throw new IllegalArgumentException(
-          "Registry documents map to the same local path: " + owner + ", " + documentUri);
+        "Registry documents map to the same local path: " + owner + ", " + documentUri);
     }
-    ObjectNode toWrite = document;
-    if ("Collection".equals(JsonSupport.text(document, "type"))) {
-      toWrite = withAbsoluteAssetHrefs(documentUri, document);
+    ObjectNode toWrite =
+        "Collection".equals(JsonSupport.text(document, "type"))
+            ? withAbsoluteAssetHrefs(documentUri, document)
+            : document.deepCopy();
+
+    JsonNode links = toWrite.get("links");
+    if (links != null && links.isArray()) {
+      for (JsonNode link : links) {
+        if (!link.isObject() || !"child".equals(JsonSupport.text(link, "rel"))) {
+          continue;
+        }
+        String href = JsonSupport.text(link, "href");
+        if (href == null) {
+          continue;
+        }
+        URI childUri = documentUri.resolve(href);
+        URI normalizedChildUri = childUri.normalize();
+        Path childTarget =
+            targetDocumentPath(outputRoot, relativeDocumentPath(rootUri, childUri), childUri);
+        URI childOwner = targets.get(childTarget);
+        if (childOwner != null && !childOwner.equals(normalizedChildUri)) {
+          throw new IllegalArgumentException(
+              "Registry documents map to the same local path: " + childOwner + ", " + childUri);
+        }
+        if (visited.contains(normalizedChildUri)) {
+          if (normalizedChildUri.equals(childOwner)) {
+            ((ObjectNode) link).put("href", relativeLocalHref(target, childTarget));
+          }
+          continue;
+        }
+        ObjectNode child = fetch.fetch(childUri.toString());
+        String type = JsonSupport.text(child, "type");
+        if ("Catalog".equals(type) || "Collection".equals(type)) {
+          writeCatalogTree(childUri, child, rootUri, outputRoot, fetch, visited, targets);
+          ((ObjectNode) link).put("href", relativeLocalHref(target, childTarget));
+        }
+      }
     }
     JsonSupport.writeObject(target, toWrite);
+  }
 
-    JsonNode links = document.get("links");
-    if (links == null || !links.isArray()) {
-      return;
-    }
-    for (JsonNode link : links) {
-      if (!link.isObject() || !"child".equals(JsonSupport.text(link, "rel"))) {
-        continue;
-      }
-      String href = JsonSupport.text(link, "href");
-      if (href == null) {
-        continue;
-      }
-      URI childUri = documentUri.resolve(href);
-      if (visited.contains(childUri.normalize())) {
-        continue;
-      }
-      Path childTarget =
-          targetDocumentPath(outputRoot, relativeDocumentPath(rootUri, childUri), childUri);
-      URI childOwner = targets.get(childTarget);
-      if (childOwner != null && !childOwner.equals(childUri)) {
-        throw new IllegalArgumentException(
-            "Registry documents map to the same local path: " + childOwner + ", " + childUri);
-      }
-      ObjectNode child = fetch.fetch(childUri.toString());
-      String type = JsonSupport.text(child, "type");
-      if ("Catalog".equals(type) || "Collection".equals(type)) {
-        writeCatalogTree(childUri, child, rootUri, outputRoot, fetch, visited, targets);
-      }
-    }
+  private static String relativeLocalHref(Path parentTarget, Path childTarget) {
+    return parentTarget.getParent().relativize(childTarget).toString().replace('\\', '/');
   }
 
   private static ObjectNode withAbsoluteAssetHrefs(URI documentUri, ObjectNode collection) {

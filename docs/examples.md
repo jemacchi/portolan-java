@@ -19,7 +19,7 @@ GitHub Packages hosts tagged versions. Add its repository and the dependency:
   <dependency>
     <groupId>org.portolan</groupId>
     <artifactId>portolan-java</artifactId>
-    <version>0.1.1</version>
+    <version>0.1.2</version>
   </dependency>
 </dependencies>
 ```

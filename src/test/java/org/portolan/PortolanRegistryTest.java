@@ -250,6 +250,54 @@ class PortolanRegistryTest {
   }
 
   @Test
+  void rewritesDownloadedChildrenToLocalHrefs() {
+    String rootUrl = "https://example.test/demo/catalog.json";
+    String childUrl = "https://example.test/demo/roads/collection.json";
+    String itemUrl = "https://example.test/demo/roads/item.json";
+    Map<String, String> responses =
+        Map.of(
+            rootUrl,
+            """
+            {
+              "type": "Catalog",
+              "id": "demo",
+              "links": [
+                {"rel": "self", "href": "https://example.test/demo/catalog.json"},
+                {"rel": "child", "href": "https://example.test/demo/roads/collection.json"},
+                {"rel": "child", "href": "https://example.test/demo/roads/item.json"}
+              ]
+            }
+            """,
+            childUrl,
+            """
+            {
+              "type": "Collection",
+              "id": "roads",
+              "links": [
+                {"rel": "child", "href": "https://example.test/demo/catalog.json"}
+              ],
+              "assets": {}
+            }
+            """,
+            itemUrl,
+            """
+            {"type": "Feature", "id": "road-1"}
+            """);
+
+    Path catalogRoot =
+        PortolanRegistry.downloadRegistryCatalog(
+            rootUrl, tempDir, url -> JsonSupport.readObject(responses.get(url)));
+
+    var catalog = JsonSupport.readObject(catalogRoot.resolve("catalog.json").toUri());
+    var collection =
+        JsonSupport.readObject(catalogRoot.resolve("roads/collection.json").toUri());
+    assertEquals(rootUrl, catalog.path("links").get(0).path("href").asText());
+    assertEquals("roads/collection.json", catalog.path("links").get(1).path("href").asText());
+    assertEquals(itemUrl, catalog.path("links").get(2).path("href").asText());
+    assertEquals("../catalog.json", collection.path("links").get(0).path("href").asText());
+  }
+
+  @Test
   void downloadsNestedRegistryCatalogWithFallbackId() throws Exception {
     Map<String, String> responses =
         Map.of(
