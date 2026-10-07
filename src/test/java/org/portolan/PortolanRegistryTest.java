@@ -298,6 +298,91 @@ class PortolanRegistryTest {
   }
 
   @Test
+  void makesNonDownloadedRelativeLinksAbsoluteAndKeepsRootAndParentLocal() {
+    String rootUrl = "https://example.test/demo/catalog.json";
+    String collectionUrl = "https://example.test/demo/roads/collection.json";
+    String featureUrl = "https://example.test/demo/roads/features/road-1.json";
+    Map<String, String> responses =
+        Map.of(
+            rootUrl,
+            """
+            {"type":"Catalog","id":"demo","links":[
+              {"rel":"child","href":"./roads/collection.json"}
+            ]}
+            """,
+            collectionUrl,
+            """
+            {"type":"Collection","id":"roads","links":[
+              {"rel":"root","href":"https://example.test/demo/catalog.json"},
+              {"rel":"parent","href":"https://example.test/demo/catalog.json"},
+              {"rel":"item","href":"./items/road-1.json"},
+              {"rel":"child","href":"./features/road-1.json"}
+            ],"assets":{}}
+            """,
+            featureUrl,
+            """
+            {"type":"Feature","id":"road-1"}
+            """);
+
+    Path catalogRoot =
+        PortolanRegistry.downloadRegistryCatalog(
+            rootUrl, tempDir, url -> JsonSupport.readObject(responses.get(url)));
+
+    var collection =
+        JsonSupport.readObject(catalogRoot.resolve("roads/collection.json").toUri());
+    assertEquals("../catalog.json", collection.path("links").get(0).path("href").asText());
+    assertEquals("../catalog.json", collection.path("links").get(1).path("href").asText());
+    assertEquals(
+        "https://example.test/demo/roads/items/road-1.json",
+        collection.path("links").get(2).path("href").asText());
+    assertEquals(featureUrl, collection.path("links").get(3).path("href").asText());
+  }
+
+  @Test
+  void resolvesRegistryDocumentAndAssetHrefsWithSpaces() {
+    String rootUrl = "https://example.test/demo/catalog.json";
+    String collectionUrl =
+        "https://example.test/demo/road%20data/collection.json?version=one%20value#section%20one";
+    Map<String, String> responses =
+        Map.of(
+            rootUrl,
+            """
+            {"type":"Catalog","id":"demo","links":[
+              {
+                "rel":"child",
+                "href":"./road data/collection.json?version=one value#section one"
+              }
+            ]}
+            """,
+            collectionUrl,
+            """
+            {"type":"Collection","id":"roads","links":[],"assets":{
+              "data": {
+                "href":"./Linee impianto a fune.parquet?download=full map#sheet one"
+              },
+              "encoded": {"href":"./already%20encoded.parquet"}
+            }}
+            """);
+
+    Path catalogRoot =
+        PortolanRegistry.downloadRegistryCatalog(
+            rootUrl, tempDir, url -> JsonSupport.readObject(responses.get(url)));
+
+    var catalog = JsonSupport.readObject(catalogRoot.resolve("catalog.json").toUri());
+    var collection =
+        JsonSupport.readObject(
+            catalogRoot.resolve("road%20data/collection.json").toUri());
+    assertEquals(
+        "road%20data/collection.json", catalog.path("links").get(0).path("href").asText());
+    assertEquals(
+        "https://example.test/demo/road%20data/Linee%20impianto%20a%20fune.parquet?download=full%20map#sheet%20one",
+        collection.path("assets").path("data").path("href").asText());
+    assertEquals(
+        "https://example.test/demo/road%20data/already%20encoded.parquet",
+        collection.path("assets").path("encoded").path("href").asText());
+  }
+
+  @Test
   void downloadsNestedRegistryCatalogWithFallbackId() throws Exception {
     Map<String, String> responses =
         Map.of(

@@ -45,7 +45,7 @@ abstract class PortolanDocument {
       result.add(
           new PortolanLink(
               rel,
-              href.resolve(rawHref),
+              HrefResolver.resolve(href, rawHref),
               JsonSupport.text(link, "type"),
               JsonSupport.text(link, "title"),
               ((ObjectNode) link).deepCopy()));
@@ -87,7 +87,7 @@ abstract class PortolanDocument {
               result.add(
                   new PortolanAsset(
                       entry.getKey(),
-                      href.resolve(rawHref),
+                      HrefResolver.resolve(href, rawHref),
                       mediaType,
                       List.copyOf(roles),
                       JsonSupport.text(asset, "title"),

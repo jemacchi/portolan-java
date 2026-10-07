@@ -63,7 +63,7 @@ public final class PortolanRegistry {
       if (catalogIds != null && !catalogIds.contains(registryId)) {
         continue;
       }
-      String resolvedHref = URI.create(effectiveRegistryUrl).resolve(href).toString();
+      String resolvedHref = HrefResolver.resolve(URI.create(effectiveRegistryUrl), href).toString();
       entries.add(
           new RegistryCatalogEntry(
               registryId, resolvedHref, JsonSupport.text(link, "title"), status));
@@ -156,14 +156,27 @@ public final class PortolanRegistry {
     JsonNode links = toWrite.get("links");
     if (links != null && links.isArray()) {
       for (JsonNode link : links) {
-        if (!link.isObject() || !"child".equals(JsonSupport.text(link, "rel"))) {
+        if (!link.isObject()) {
           continue;
         }
         String href = JsonSupport.text(link, "href");
         if (href == null) {
           continue;
         }
-        URI childUri = documentUri.resolve(href);
+        String rel = JsonSupport.text(link, "rel");
+        URI linkedUri = HrefResolver.resolve(documentUri, href);
+        ObjectNode linkObject = (ObjectNode) link;
+        linkObject.put("href", linkedUri.toString());
+        if ("root".equals(rel) || "parent".equals(rel)) {
+          Path linkedTarget = localTarget(targets, linkedUri.normalize());
+          if (linkedTarget != null) {
+            linkObject.put("href", relativeLocalHref(target, linkedTarget));
+          }
+        }
+        if (!"child".equals(rel)) {
+          continue;
+        }
+        URI childUri = linkedUri;
         URI normalizedChildUri = childUri.normalize();
         Path childTarget =
             targetDocumentPath(outputRoot, relativeDocumentPath(rootUri, childUri), childUri);
@@ -174,7 +187,7 @@ public final class PortolanRegistry {
         }
         if (visited.contains(normalizedChildUri)) {
           if (normalizedChildUri.equals(childOwner)) {
-            ((ObjectNode) link).put("href", relativeLocalHref(target, childTarget));
+            linkObject.put("href", relativeLocalHref(target, childTarget));
           }
           continue;
         }
@@ -182,7 +195,7 @@ public final class PortolanRegistry {
         String type = JsonSupport.text(child, "type");
         if ("Catalog".equals(type) || "Collection".equals(type)) {
           writeCatalogTree(childUri, child, rootUri, outputRoot, fetch, visited, targets);
-          ((ObjectNode) link).put("href", relativeLocalHref(target, childTarget));
+          linkObject.put("href", relativeLocalHref(target, childTarget));
         }
       }
     }
@@ -191,6 +204,14 @@ public final class PortolanRegistry {
 
   private static String relativeLocalHref(Path parentTarget, Path childTarget) {
     return parentTarget.getParent().relativize(childTarget).toString().replace('\\', '/');
+  }
+
+  private static Path localTarget(Map<Path, URI> targets, URI uri) {
+    return targets.entrySet().stream()
+        .filter(entry -> entry.getValue().equals(uri))
+        .map(Map.Entry::getKey)
+        .findFirst()
+        .orElse(null);
   }
 
   private static ObjectNode withAbsoluteAssetHrefs(URI documentUri, ObjectNode collection) {
@@ -209,7 +230,8 @@ public final class PortolanRegistry {
               }
               String href = JsonSupport.text(asset, "href");
               if (href != null) {
-                ((ObjectNode) asset).put("href", documentUri.resolve(href).toString());
+                ((ObjectNode) asset)
+                    .put("href", HrefResolver.resolve(documentUri, href).toString());
               }
             });
     return updated;
@@ -219,8 +241,8 @@ public final class PortolanRegistry {
     if (!sameOrigin(rootUri, documentUri)) {
       throw new IllegalArgumentException("Child document has a different origin: " + documentUri);
     }
-    Path rootParent = Path.of(rootUri.getPath()).getParent();
-    Path documentPath = Path.of(documentUri.getPath());
+    Path rootParent = Path.of(rootUri.getRawPath()).getParent();
+    Path documentPath = Path.of(documentUri.getRawPath());
     if (rootParent == null) {
       return Path.of(documentPath.getFileName().toString());
     }

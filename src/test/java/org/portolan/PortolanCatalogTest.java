@@ -2,8 +2,10 @@ package org.portolan;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -258,6 +260,57 @@ class PortolanCatalogTest {
     assertEquals(List.of(), collection.links());
     assertEquals(List.of(), collection.assets());
     assertEquals(List.of(), collection.items());
+  }
+
+  @Test
+  void resolvesRelativeHrefsWithSpacesWithoutChangingExistingEscapes() {
+    PortolanCollection collection =
+        new PortolanCollection(
+            JsonSupport.readObject(
+                """
+                {
+                  "type": "Collection",
+                  "id": "roads",
+                  "links": [
+                    {
+                      "rel": "item",
+                      "href": "./Items and maps/item%201.json?name=road map#part one"
+                    }
+                  ],
+                  "assets": {
+                    "data": {
+                      "href": "./Linee impianto a fune.parquet?download=full map#sheet one"
+                    }
+                  }
+                }
+                """),
+            URI.create("https://example.test/demo/collection.json"));
+
+    assertEquals(
+        "https://example.test/demo/Items%20and%20maps/item%201.json?name=road%20map#part%20one",
+        collection.links().get(0).href().toString());
+    assertEquals(
+        "https://example.test/demo/Linee%20impianto%20a%20fune.parquet?download=full%20map#sheet%20one",
+        collection.assets().get(0).href().toString());
+  }
+
+  @Test
+  void reportsMalformedHrefWithDocumentContext() {
+    PortolanCollection collection =
+        new PortolanCollection(
+            JsonSupport.readObject(
+                """
+                {"type":"Collection","id":"roads","links":[
+                  {"rel":"item","href":"http://[invalid"}
+                ]}
+                """),
+            URI.create("https://example.test/demo/collection.json"));
+
+    IllegalArgumentException error =
+        assertThrows(IllegalArgumentException.class, collection::links);
+
+    assertTrue(error.getMessage().contains("Invalid href"));
+    assertTrue(error.getMessage().contains("http://[invalid"));
   }
 
   @Test
