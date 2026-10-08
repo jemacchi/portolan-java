@@ -19,7 +19,7 @@ GitHub Packages hosts tagged versions. Add its repository and the dependency:
   <dependency>
     <groupId>org.portolan</groupId>
     <artifactId>portolan-java</artifactId>
-    <version>0.1.3</version>
+    <version>0.1.4</version>
   </dependency>
 </dependencies>
 ```
@@ -111,10 +111,14 @@ var entries =
         false,
         5);
 
-entries.forEach(entry -> System.out.println(entry.id() + " " + entry.url()));
+entries.forEach(entry -> System.out.printf(
+    "%s collections=%s bbox=%s %s%n",
+    entry.id(), entry.collectionCount(), entry.bbox(), entry.url()));
 ```
 
-Pass a custom fetcher in tests when you do not want network access.
+Each entry also exposes license IDs, feature counts, total size, update time,
+logo URL, and a failure reason. Pass a custom fetcher in tests when you do not
+want network access.
 
 ## Find and validate one registry catalog
 

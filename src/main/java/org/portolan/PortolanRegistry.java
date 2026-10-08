@@ -11,6 +11,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -64,14 +65,79 @@ public final class PortolanRegistry {
         continue;
       }
       String resolvedHref = HrefResolver.resolve(URI.create(effectiveRegistryUrl), href).toString();
+      if (!isRemoteUrl(resolvedHref)) {
+        continue;
+      }
+      JsonNode licenses = link.get("portolan_registry:licenses");
+      JsonNode logo = link.get("portolan_registry:logo");
       entries.add(
           new RegistryCatalogEntry(
-              registryId, resolvedHref, JsonSupport.text(link, "title"), status));
+              registryId,
+              resolvedHref,
+              JsonSupport.text(link, "title"),
+              status,
+              horizontalBbox(link.get("bbox")),
+              licenseIds(licenses),
+              optionalLong(link.get("portolan_registry:collection_count")),
+              optionalLong(link.get("portolan_registry:feature_count")),
+              optionalLong(link.get("portolan_registry:total_size_bytes")),
+              optionalText(link.get("portolan_registry:updated")),
+              logo != null && logo.isObject() ? optionalText(logo.get("href")) : null,
+              optionalText(link.get("portolan_registry:failure_reason"))));
       if (limit != null && entries.size() >= limit) {
         break;
       }
     }
     return List.copyOf(entries);
+  }
+
+  private static boolean isRemoteUrl(String value) {
+    URI uri = URI.create(value);
+    String scheme = normalized(uri.getScheme());
+    return ("http".equals(scheme) || "https".equals(scheme))
+        && uri.getRawAuthority() != null
+        && !uri.getRawAuthority().isBlank();
+  }
+
+  private static List<Double> horizontalBbox(JsonNode value) {
+    if (value == null || !value.isArray() || value.size() < 4 || value.size() % 2 != 0) {
+      return null;
+    }
+    List<Double> coordinates = new ArrayList<>(value.size());
+    for (JsonNode coordinate : value) {
+      if (!coordinate.isNumber() || !Double.isFinite(coordinate.doubleValue())) {
+        return null;
+      }
+      coordinates.add(coordinate.doubleValue());
+    }
+    int half = coordinates.size() / 2;
+    return List.of(
+        coordinates.get(0),
+        coordinates.get(1),
+        coordinates.get(half),
+        coordinates.get(half + 1));
+  }
+
+  private static List<String> licenseIds(JsonNode value) {
+    if (value == null || !value.isObject()) {
+      return List.of();
+    }
+    List<String> licenses = new ArrayList<>();
+    value.fieldNames().forEachRemaining(licenses::add);
+    licenses.sort(Comparator.naturalOrder());
+    return List.copyOf(licenses);
+  }
+
+  private static Long optionalLong(JsonNode value) {
+    return value != null && value.isIntegralNumber() && value.canConvertToLong()
+        ? value.longValue()
+        : null;
+  }
+
+  private static String optionalText(JsonNode value) {
+    return value != null && value.isTextual() && !value.textValue().isEmpty()
+        ? value.textValue()
+        : null;
   }
 
   public static Path downloadRegistryCatalog(String catalogUrl, Path outputDir, JsonFetcher fetcher) {

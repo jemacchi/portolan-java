@@ -1,6 +1,7 @@
 package org.portolan;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -27,8 +28,19 @@ class PortolanRegistryTest {
               "rel": "child",
               "href": "https://example.test/a/catalog.json",
               "title": "A",
+              "bbox": [-71.0, -35.0, -70.0, -34.0],
               "portolan_registry:id": "catalog-a",
-              "portolan_registry:status": "valid"
+              "portolan_registry:status": "valid",
+              "portolan_registry:licenses": {"ODbL-1.0": 2, "CC-BY-4.0": 1},
+              "portolan_registry:collection_count": 3,
+              "portolan_registry:feature_count": 42,
+              "portolan_registry:total_size_bytes": 2048,
+              "portolan_registry:updated": "2026-10-08T00:00:00Z",
+              "portolan_registry:logo": {
+                "href": "https://example.test/a/logo.png",
+                "type": "image/png"
+              },
+              "portolan_registry:failure_reason": null
             },
             {
               "rel": "child",
@@ -52,6 +64,53 @@ class PortolanRegistryTest {
     assertEquals(List.of("catalog-a"), entries.stream().map(RegistryCatalogEntry::id).toList());
     assertEquals("https://example.test/a/catalog.json", entries.get(0).url());
     assertEquals("A", entries.get(0).title());
+    assertEquals(List.of(-71.0, -35.0, -70.0, -34.0), entries.get(0).bbox());
+    assertEquals(List.of("CC-BY-4.0", "ODbL-1.0"), entries.get(0).licenses());
+    assertEquals(3L, entries.get(0).collectionCount());
+    assertEquals(42L, entries.get(0).featureCount());
+    assertEquals(2048L, entries.get(0).totalSizeBytes());
+    assertEquals("2026-10-08T00:00:00Z", entries.get(0).updated());
+    assertEquals("https://example.test/a/logo.png", entries.get(0).logoUrl());
+    assertNull(entries.get(0).failureReason());
+  }
+
+  @Test
+  void ignoresMalformedOptionalRegistryMetadata() {
+    String registry =
+        """
+        {"links":[{
+          "rel":"child",
+          "href":"https://example.test/a/catalog.json",
+          "bbox":[true, -35.0, -70.0, -34.0],
+          "portolan_registry:id":"catalog-a",
+          "portolan_registry:status":"valid",
+          "portolan_registry:licenses":["not", "an", "object"],
+          "portolan_registry:collection_count":true,
+          "portolan_registry:feature_count":"many",
+          "portolan_registry:total_size_bytes":1.5,
+          "portolan_registry:updated":7,
+          "portolan_registry:logo":{"href":9},
+          "portolan_registry:failure_reason":[]
+        }]}
+        """;
+
+    RegistryCatalogEntry entry =
+        PortolanRegistry.loadRegistryEntries(
+                "https://registry.test/catalogs.json",
+                url -> JsonSupport.readObject(registry),
+                null,
+                false,
+                null)
+            .get(0);
+
+    assertNull(entry.bbox());
+    assertTrue(entry.licenses().isEmpty());
+    assertNull(entry.collectionCount());
+    assertNull(entry.featureCount());
+    assertNull(entry.totalSizeBytes());
+    assertNull(entry.updated());
+    assertNull(entry.logoUrl());
+    assertNull(entry.failureReason());
   }
 
   @Test
@@ -64,6 +123,12 @@ class PortolanRegistryTest {
             {"rel": "item", "href": "https://example.test/ignored/item.json"},
             {"rel": "child", "href": "https://example.test/missing-id/catalog.json"},
             {"rel": "child", "href": 5, "portolan_registry:id": "bad-href"},
+            {
+              "rel": "child",
+              "href": "javascript:alert(1)",
+              "portolan_registry:id": "unsafe-scheme",
+              "portolan_registry:status": "valid"
+            },
             {
               "rel": "child",
               "href": "https://example.test/b/catalog.json",
